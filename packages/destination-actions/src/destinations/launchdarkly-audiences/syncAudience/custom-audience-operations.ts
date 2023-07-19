@@ -50,7 +50,6 @@ const parseCustomAudienceBatches = (payload: Payload[], settings: Settings): Aud
   // map to handle different audiences in the batch
   const audienceMap = new Map<AudienceName, AudienceBatch>()
 
-  console.log(payload)
   for (const p of payload) {
     if (p.segment_computation_action !== CONSTANTS.SUPPORTED_SEGMENT_COMPUTATION_ACTION) {
       // ignore event
