@@ -1,14 +1,24 @@
-import type { DestinationDefinition } from '@segment/actions-core'
-import type { Settings } from './generated-types'
+import {
+  IntegrationError,
+  AudienceDestinationDefinition,
+  PayloadValidationError,
+  APIError
+} from '@segment/actions-core'
+import type { Settings, AudienceSettings } from './generated-types'
 
+import { API_URL } from './config'
 import upsertProfile from './upsertProfile'
-import { API_URL, REVISION_DATE } from './config'
-
+import addProfileToList from './addProfileToList'
+import removeProfileFromList from './removeProfileFromList'
 import trackEvent from './trackEvent'
-
 import orderCompleted from './orderCompleted'
+import subscribeProfile from './subscribeProfile'
+import { buildHeaders } from './functions'
+import removeProfile from './removeProfile'
 
-const destination: DestinationDefinition<Settings> = {
+import unsubscribeProfile from './unsubscribeProfile'
+
+const destination: AudienceDestinationDefinition<Settings, AudienceSettings> = {
   name: 'Klaviyo (Actions)',
   slug: 'actions-klaviyo',
   mode: 'cloud',
@@ -17,7 +27,7 @@ const destination: DestinationDefinition<Settings> = {
     scheme: 'custom',
     fields: {
       api_key: {
-        type: 'string',
+        type: 'password',
         label: 'API Key',
         description: `You can find this by going to Klaviyo's UI and clicking Account > Settings > API Keys > Create API Key`,
         required: true
@@ -51,18 +61,91 @@ const destination: DestinationDefinition<Settings> = {
 
   extendRequest({ settings }) {
     return {
-      headers: {
-        Authorization: `Klaviyo-API-Key ${settings.api_key}`,
-        Accept: 'application/json',
-        revision: REVISION_DATE
+      headers: buildHeaders(settings.api_key)
+    }
+  },
+  audienceFields: {
+    listId: {
+      label: 'List Id',
+      description: `Insert the ID of the default list that you'd like to subscribe users to when you call .identify().
+       NOTE: List ID takes precedence set within Actions.`,
+      type: 'string'
+    }
+  },
+  audienceConfig: {
+    mode: {
+      type: 'synced',
+      full_audience_sync: false
+    },
+    async createAudience(request, createAudienceInput) {
+      const audienceName = createAudienceInput.audienceName
+      const apiKey = createAudienceInput.settings.api_key
+      const defaultAudienceId = createAudienceInput.audienceSettings?.listId
+
+      if (defaultAudienceId) {
+        return { externalId: defaultAudienceId }
+      }
+
+      if (!audienceName) {
+        throw new PayloadValidationError('Missing audience name value')
+      }
+
+      if (!apiKey) {
+        throw new PayloadValidationError('Missing Api Key value')
+      }
+
+      const response = await request(`${API_URL}/lists`, {
+        method: 'POST',
+        headers: buildHeaders(apiKey),
+        json: {
+          data: { type: 'list', attributes: { name: audienceName } }
+        }
+      })
+      const r = await response.json()
+      return {
+        externalId: r.data.id
+      }
+    },
+    async getAudience(request, getAudienceInput) {
+      const listId = getAudienceInput.externalId
+      const apiKey = getAudienceInput.settings.api_key
+      const response = await request(`${API_URL}/lists/${listId}`, {
+        method: 'GET',
+        headers: buildHeaders(apiKey),
+        throwHttpErrors: false
+      })
+
+      if (!response.ok) {
+        const errorResponse = await response.json()
+        const klaviyoErrorDetail = errorResponse.errors[0].detail
+        throw new APIError(klaviyoErrorDetail, response.status)
+      }
+
+      const r = await response.json()
+      const externalId = r.data.id
+
+      if (externalId !== getAudienceInput.externalId) {
+        throw new IntegrationError(
+          "Unable to verify ownership over audience. Segment Audience ID doesn't match The Klaviyo List Id.",
+          'INVALID_REQUEST_DATA',
+          400
+        )
+      }
+
+      return {
+        externalId
       }
     }
   },
-
   actions: {
     upsertProfile,
+    addProfileToList,
+    removeProfileFromList,
     trackEvent,
-    orderCompleted
+    orderCompleted,
+    subscribeProfile,
+    unsubscribeProfile,
+    removeProfile
   }
 }
 

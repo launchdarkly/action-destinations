@@ -1,7 +1,7 @@
 import type { BrowserActionDefinition } from '@segment/browser-destination-runtime/types'
 import type { Settings } from '../generated-types'
 import type { Payload } from './generated-types'
-import type { PendoSDK, identifyPayload } from '../types'
+import type { PendoSDK, PendoOptions } from '../types'
 
 const action: BrowserActionDefinition<Settings, PendoSDK, Payload> = {
   title: 'Send Identify Event',
@@ -11,12 +11,13 @@ const action: BrowserActionDefinition<Settings, PendoSDK, Payload> = {
   fields: {
     visitorId: {
       label: 'Visitor ID',
-      description: 'Pendo Visitor ID. Defaults to Segment userId',
+      description: 'Pendo Visitor ID. Maps to Segment userId',
       type: 'string',
       required: true,
       default: {
         '@path': '$.userId'
-      }
+      },
+      readOnly: true
     },
     visitorData: {
       label: 'Visitor Metadata',
@@ -24,61 +25,40 @@ const action: BrowserActionDefinition<Settings, PendoSDK, Payload> = {
       type: 'object',
       default: {
         '@path': '$.traits'
-      }
+      },
+      readOnly: false
     },
     accountId: {
       label: 'Account ID',
-      description: 'Pendo Account ID. This overrides the Pendo Account ID setting',
+      description:
+        'Pendo Account ID. Maps to Segment groupId.  Note: If you plan to change this, enable the setting "Use custom Segment group trait for Pendo account id"',
       type: 'string',
       required: false,
       default: {
         '@if': {
-          exists: { '@path': '$.context.group_id' },
-          then: { '@path': '$.context.group_id' },
+          exists: { '@path': '$.context.groupId' },
+          then: { '@path': '$.context.groupId' },
           else: { '@path': '$.groupId' }
         }
-      }
-    },
-    accountData: {
-      label: 'Account Metadata',
-      description: 'Additional Account data to send',
-      type: 'object',
-      required: false
-    },
-    parentAccountId: {
-      label: 'Parent Account ID',
-      description:
-        'Pendo Parent Account ID. This overrides the Pendo Parent Account ID setting. Note: Contact Pendo to request enablement of Parent Account feature.',
-      type: 'string',
-      required: false
-    },
-    parentAccountData: {
-      label: 'Parent Account Metadata',
-      description:
-        'Additional Parent Account data to send. Note: Contact Pendo to request enablement of Parent Account feature.',
-      type: 'object',
-      required: false
+      },
+      readOnly: false
     }
   },
   perform: (pendo, event) => {
-    const payload: identifyPayload = {
+    const payload: PendoOptions = {
       visitor: {
-        id: event.payload.visitorId,
-        ...event.payload.visitorData
+        ...event.payload.visitorData,
+        id: event.payload.visitorId
       }
     }
-    if (event.payload.accountId || event.settings.accountId) {
-      payload.account = {
-        id: (event.payload.accountId as string) ?? (event.settings.accountId as string),
-        ...event.payload.accountData
-      }
+
+    const analyticsGroupId = typeof event.analytics?.group === 'function' ? event.analytics.group()?.id() : undefined
+    if (event.payload.accountId) {
+      payload['account'] = { id: event.payload.accountId }
+    } else if (analyticsGroupId && !event.settings.disableGroupIdAndTraitsOnLoad) {
+      payload['account'] = { id: analyticsGroupId }
     }
-    if (event.payload.parentAccountId || event.settings.parentAccountId) {
-      payload.parentAccount = {
-        id: (event.payload.parentAccountId as string) ?? (event.settings.parentAccountId as string),
-        ...event.payload.parentAccountData
-      }
-    }
+
     pendo.identify(payload)
   }
 }

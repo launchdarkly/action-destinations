@@ -18,24 +18,23 @@ const createAudienceInput = {
     customer_desc: CUST_DESC
   },
   audienceName: '',
-  audienceSettings: {
-    audience_key: AUDIENCE_KEY,
-    audience_id: AUDIENCE_ID,
-    identifier: ''
+  audienceSettings: {},
+  personas: {
+    computation_key: AUDIENCE_KEY,
+    computation_id: AUDIENCE_ID,
+    namespace: 'spa_12124214124'
   }
 }
+const testDestination = createTestIntegration(Destination)
 
 describe('Yahoo Audiences', () => {
   describe('createAudience() function', () => {
-    let testDestination: any
     const OLD_ENV = process.env
-
     beforeEach(() => {
       jest.resetModules() // Most important - it clears the cache
       process.env = { ...OLD_ENV } // Make a copy
       process.env.ACTIONS_YAHOO_AUDIENCES_TAXONOMY_CLIENT_SECRET = 'yoda'
       process.env.ACTIONS_YAHOO_AUDIENCES_TAXONOMY_CLIENT_ID = 'luke'
-      testDestination = createTestIntegration(Destination)
     })
 
     afterAll(() => {
@@ -48,30 +47,14 @@ describe('Yahoo Audiences', () => {
           anything: '123'
         })
 
-        createAudienceInput.audienceSettings.identifier = 'anything'
+        //createAudienceInput.audienceSettings.identifier = 'anything'
         const result = await testDestination.createAudience(createAudienceInput)
         expect(result.externalId).toBe(AUDIENCE_ID)
       })
     })
     describe('Failure cases', () => {
-      it('should throw an error when audience_id setting is missing', async () => {
-        createAudienceInput.settings.engage_space_id = 'acme_corp_engage_space'
-        createAudienceInput.audienceSettings.audience_key = 'sneakeres_buyers'
-        createAudienceInput.audienceSettings.audience_id = ''
-        await expect(testDestination.createAudience(createAudienceInput)).rejects.toThrowError(IntegrationError)
-      })
-
-      it('should throw an error when audience_key setting is missing', async () => {
-        createAudienceInput.settings.engage_space_id = 'acme_corp_engage_space'
-        createAudienceInput.audienceSettings.audience_key = ''
-        createAudienceInput.audienceSettings.audience_id = 'aud_12345'
-        await expect(testDestination.createAudience(createAudienceInput)).rejects.toThrowError(IntegrationError)
-      })
-
       it('should throw an error when engage_space_id setting is missing', async () => {
         createAudienceInput.settings.engage_space_id = ''
-        createAudienceInput.audienceSettings.audience_key = 'sneakeres_buyers'
-        createAudienceInput.audienceSettings.audience_id = 'aud_123456789012345678901234567'
         await expect(testDestination.createAudience(createAudienceInput)).rejects.toThrowError(IntegrationError)
       })
     })
@@ -79,18 +62,12 @@ describe('Yahoo Audiences', () => {
 
   describe('gen_update_segment_payload() function', () => {
     describe('Success cases', () => {
-      const audienceSettings = {
-        audience_key: AUDIENCE_KEY,
-        audience_id: AUDIENCE_ID,
-        identifier: 'email'
-      }
-
       it('trivial', () => {
         // Given
-        const payloads: Payload[] = [{ gdpr_flag: false } as Payload]
+        const payloads: Payload[] = [{} as Payload]
 
         // When
-        const result = gen_update_segment_payload(payloads, audienceSettings)
+        const result = gen_update_segment_payload(payloads)
 
         // Then
         expect(result).toBeTruthy()
@@ -141,7 +118,7 @@ describe('Yahoo Audiences', () => {
         ]
 
         // When
-        const result = gen_update_segment_payload(payloads, audienceSettings)
+        const result = gen_update_segment_payload(payloads)
 
         // Then
         expect(result).toBeTruthy()

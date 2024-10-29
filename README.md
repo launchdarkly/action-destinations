@@ -31,6 +31,7 @@ For more detailed instruction, see the following READMEs:
 - [Presets](#presets)
 - [perform function](#the-perform-function)
 - [Batching Requests](#batching-requests)
+- [Action Hooks](#action-hooks)
 - [HTTP Requests](#http-requests)
 - [Support](#support)
 
@@ -323,6 +324,31 @@ const destination = {
           description: "The person's email address",
           type: 'string',
           default: { '@path': '$.properties.email_address' }
+        },
+        // an object field example. Defaults should be specified on the top level.
+        value: {
+          label: 'Conversion Value',
+          description: 'The monetary value for a conversion. This is an object with shape: {"currencyCode": USD", "amount": "100"}'
+          type: 'object'
+          default: {
+            currencyCode: { '@path': '$.properties.currency' },
+            amount: { '@path': '$.properties.revenue' }
+          },
+          properties: {
+            currencyCode: {
+              label: 'Currency Code',
+              type: 'string',
+              required: true,
+              description: 'ISO format'
+            },
+            amount: {
+              label: 'Amount',
+              type: 'string',
+              required: true,
+              description: 'Value of the conversion in decimal string. Can be dynamically set up or have a fixed value.'
+            }
+          }
+          }
         }
       }
     }
@@ -389,6 +415,74 @@ const destination = {
 }
 ```
 
+## Conditional Fields
+
+Conditional fields enable a field only when a predefined list of conditions are met while the user steps through the mapping editor. This is useful when showing a field becomes unnecessary based on the value of some other field.
+
+For example, in the Salesforce destination the 'Bulk Upsert External ID' field is only relevant when the user has selected 'Operation: Upsert' and 'Enable Batching: True'. In all other cases the field will be hidden to streamline UX while setting up the mapping.
+
+To define a conditional field, the `InputField` should implement the `depends_on` property. This property lives in destination-kit and the definition can be found here: [`packages/core/src/destination-kit/types.ts`](https://github.com/segmentio/action-destinations/blame/854a9e154547a54a7323dc3d4bf95bc31d31433a/packages/core/src/destination-kit/types.ts).
+
+The above Salesforce use case is defined like this:
+
+```js
+export const bulkUpsertExternalId: InputField = {
+  // other properties skipped for brevity ...
+  depends_on: {
+    match: 'all', // match is optional and can be either 'any' or 'all'. If left undefiend it defaults to matching all conditions.
+    conditions: [
+      {
+        fieldKey: 'operation', // field keys must match some other field in the same action
+        operator: 'is',
+        value: 'upsert'
+      },
+      {
+        fieldKey: 'enable_batching',
+        operator: 'is',
+        value: true
+      }
+    ]
+  }
+}
+```
+
+Lists of values can also be included as match conditions. For example:
+
+```js
+export const recordMatcherOperator: InputField = {
+  // ...
+  depends_on: {
+    // This is interpreted as "show recordMatcherOperator if operation is (update or upsert or delete)"
+    conditions: [
+      {
+        fieldKey: 'operation',
+        operator: 'is',
+        value: ['update', 'upsert', 'delete']
+      }
+    ]
+  }
+}
+```
+
+The value can be undefined, which allows matching against empty fields or fields which contain any value. For example:
+
+```js
+export const name: InputField = {
+  // ...
+  depends_on: {
+    match: 'all',
+    // The name field will be shown only if conversionRuleId is not empty.
+    conditions: [
+      {
+        fieldKey: 'conversionRuleId',
+        operator: 'is_not',
+        value: undefined
+      }
+    ]
+  }
+}
+```
+
 ## Presets
 
 Presets are pre-built use cases to enable customers to get started quickly with an action destination. They include everything needed to generate a valid subscription.
@@ -437,8 +531,10 @@ The `perform` method accepts two arguments, (1) the request client instance (ext
 - `features` - The features available in the request based on the customer's sourceID. Features can only be enabled and/or used by internal Twilio/Segment employees. Features cannot be used for Partner builds.
 - `statsContext` - An object, containing a `statsClient` and `tags`. Stats can only be used by internal Twilio/Segment employees. Stats cannot be used for Partner builds.
 - `logger` - Logger can only be used by internal Twilio/Segment employees. Logger cannot be used for Partner builds.
+- `engageDestinationCache` - EngageDestinationCache can only be used by internal Twilio/Segment employees. EngageDestinationCache should not be used for Partner builds.
 - `transactionContext` - An object, containing transaction variables and a method to update transaction variables which are required for few segment developed actions. Transaction Context cannot be used for Partner builds.
 - `stateContext` - An object, containing context variables and a method to get and set context variables which are required for few segment developed actions. State Context cannot be used for Partner builds.
+- `subscriptionMetadata` - an object, containing variables which identify the instance of a Destination and Action as well as other metadata. Subscription Metadata cannot be used for Partner builds.
 
 A basic example:
 
@@ -516,6 +612,103 @@ Keep in mind a few important things about how batching works:
 - Batch sizes are not guaranteed. Due to the way that batches are accumulated internally, you may see smaller batch sizes than you expect when sending low rates of events.
 
 Additionally, you’ll need to coordinate with Segment’s R&D team for the time being. Please reach out to us in your dedicated Slack channel!
+
+## Action Hooks
+
+Hooks allow builders to perform requests against a destination at certain points in the lifecycle of a mapping. Values can then be persisted from that request to be used later on in the action's `perform` method.
+
+At the moment two hooks are available: `onMappingSave` and `retlOnMappingSave`:
+
+- `onMappingSave`: This hook appears in the MappingEditor page as a separate step. Users fill in the defined input fields and the code in the `performHook` block is triggered when the user saves their mapping.
+- `retlOnMappingSave`: This hook appears only for destinations connected to a RETL warehouse source. It is otherwise the same as the `onMappingSave` hook.
+
+**Inputs**
+
+Builders may define a set of `inputFields` that are used when performing the request to the destination.
+
+**`performHook`**
+
+Similar to the `perform` method, the `performHook` method allows builders to trigger a request to the destination whenever the criteria for that hook to be triggered is met. This method uses the `inputFields` defined as request parameters.
+
+**Outputs**
+
+Builders define the shape of the hook output with the `outputTypes` property. Successful returns from `performHook` should match the keys defined here. These values are then saved on a per-mapping basis, and can be used in the `perform` or `performBatch` methods when events are sent through the mapping. Outputs can be referenced in the `perform` block with `data.hookOutputs?.<hookType>?.<property>`
+
+### Example (LinkedIn Conversions API)
+
+This example has been shorted for brevity. The full code can be seen in the LinkedIn Conversions API 'streamConversion' action.
+
+```js
+const action: ActionDefinition<Settings, Payload, undefined, HookBundle> = {
+  title: 'Stream Conversion Event',
+  ...
+  hooks: {
+        'onMappingSave': {
+      type: 'onMappingSave',
+      label: 'Create a Conversion Rule',
+      description:
+        'When saving this mapping, we will create a conversion rule in LinkedIn using the fields you provided.',
+      inputFields: {
+        name: {
+          type: 'string',
+          label: 'Name',
+          description: 'The name of the conversion rule.',
+          required: true
+        },
+        conversionType: {
+          type: 'string',
+          label: 'Conversion Type',
+          description: 'The type of conversion rule.',
+          required: true
+        },
+      },
+      outputTypes: {
+        id: {
+          type: 'string',
+          label: 'ID',
+          description: 'The ID of the conversion rule.',
+          required: true
+        },
+        name: {
+          type: 'string',
+          label: 'Name',
+          description: 'The name of the conversion rule.',
+          required: true
+        },
+      },
+      performHook: async (request, { hookInputs }) => {
+        const { data } =
+          await request<ConversionRuleCreationResponse>
+          ('https://api.linkedin.com/rest/conversions', {
+          method: 'post',
+          json: {
+            name: hookInputs.name,
+            type: hookInputs.conversionType
+          }
+        })
+
+        return {
+          successMessage:
+          `Conversion rule ${data.id} created successfully!`,
+          savedData: {
+            id: data.id,
+            name: data.name,
+          }
+        }
+      }
+    }
+  },
+    perform: (request, data) => {
+    return request('https://example.com', {
+      method: 'post',
+      json: {
+        conversion: data.hookOutputs?.onMappingSave?.id,
+        name: data.hookOutputs?.onMappingSave?.name
+      }
+    })
+  }
+  }
+```
 
 ## Audience Support (Pilot)
 
@@ -652,7 +845,7 @@ For any issues, please contact our support team at partner-support@segment.com.
 
 MIT License
 
-Copyright (c) 2023 Segment
+Copyright (c) 2024 Segment
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

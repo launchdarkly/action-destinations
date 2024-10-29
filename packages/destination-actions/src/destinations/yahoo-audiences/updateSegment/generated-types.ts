@@ -20,6 +20,10 @@ export interface Payload {
    */
   segment_computation_action: string
   /**
+   * Phone number of a user
+   */
+  phone?: string
+  /**
    * Email address of a user
    */
   email?: string
@@ -28,23 +32,28 @@ export interface Payload {
    */
   advertising_id?: string
   /**
-   * Phone number of a user
-   */
-  phone?: string
-  /**
    * User's mobile device type
    */
   device_type?: string
   /**
-   * Specify the identifier(s) to send to Yahoo
+   * GDPR Settings for the audience
    */
-  identifier: string
+  gdpr_settings?: {
+    /**
+     * Set to true to indicate that audience data is subject to GDPR regulations
+     */
+    gdpr_flag: boolean
+    /**
+     * Required if GDPR flag is set to "true". Using IAB Purpose bit descriptions specify the following user consent attributes: "Storage and Access of Information", "Personalization"
+     */
+    gdpr_euconsent?: string
+  }
   /**
-   * Set to true to indicate that audience data is subject to GDPR regulations
+   * If true, batch requests to Yahoo. Yahoo accepts batches of up to 1000 events. If false, send each event individually.
    */
-  gdpr_flag: boolean
+  enable_batching?: boolean
   /**
-   * Required if GDPR flag is set to "true". Using IAB Purpose bit descriptions specify the following user consent attributes: "Storage and Access of Information", "Personalization"
+   * Maximum number of events to include in each batch. Actual batch sizes may be lower.
    */
-  gdpr_euconsent?: string
+  batch_size?: number
 }

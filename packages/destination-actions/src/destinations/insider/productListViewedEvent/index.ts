@@ -8,7 +8,9 @@ import {
   segment_anonymous_id,
   timestamp,
   user_attributes,
-  uuid
+  uuid,
+  append_arrays,
+  custom_identifiers
 } from '../insider-properties'
 import { API_BASE, sendBulkTrackEvents, sendTrackEvent, UPSERT_ENDPOINT } from '../insider-helpers'
 
@@ -19,8 +21,10 @@ const action: ActionDefinition<Settings, Payload> = {
   fields: {
     email_as_identifier: { ...email_as_identifier },
     phone_number_as_identifier: { ...phone_number_as_identifier },
+    append_arrays: { ...append_arrays },
     uuid: { ...uuid },
     segment_anonymous_id: { ...segment_anonymous_id },
+    custom_identifiers: { ...custom_identifiers },
     timestamp: { ...timestamp },
     parameters: { ...getEventParameteres(['taxonomy', 'url', 'referrer']) },
     attributes: { ...user_attributes }

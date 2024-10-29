@@ -6,7 +6,11 @@ export interface Settings {
    */
   projectId: string
   /**
-   * Toggling to true will prevent Jimo from initializing automatically. For more information, check out: https://help.usejimo.com/knowledge-base/for-developers/sdk-guides/manual-initialization
+   * Enable this option if you'd like Jimo to refetch experiences supposed to be shown to the user after user traits get updated. This is useful when if you have experiences that use segment based on Segment traits.
+   */
+  refetchExperiencesOnTraitsUpdate?: boolean
+  /**
+   * If true, Jimo SDK will be initialized only after a Segment event containing a userID has been triggered. This prevents from having anonymous profile created in Jimo.
    */
   manualInit?: boolean
 }

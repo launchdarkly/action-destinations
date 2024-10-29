@@ -1,7 +1,17 @@
 import { validate, parseFql, ErrorCondition } from '@segment/destination-subscriptions'
 import { EventEmitterSlug } from '@segment/action-emitters'
 import type { JSONSchema4 } from 'json-schema'
-import { Action, ActionDefinition, BaseActionDefinition, RequestFn, ExecuteDynamicFieldInput } from './action'
+import {
+  Action,
+  ActionDefinition,
+  ActionHookDefinition,
+  ActionHookType,
+  hookTypeStrings,
+  ActionHookResponse,
+  BaseActionDefinition,
+  RequestFn,
+  ExecuteDynamicFieldInput
+} from './action'
 import { time, duration } from '../time'
 import { JSONLikeObject, JSONObject, JSONValue } from '../json-object'
 import { SegmentEvent } from '../segment-event'
@@ -9,15 +19,34 @@ import { fieldsToJsonSchema, MinimalInputField } from './fields-to-jsonschema'
 import createRequestClient, { RequestClient, ResponseError } from '../create-request-client'
 import { validateSchema } from '../schema-validation'
 import type { ModifiedResponse } from '../types'
-import type { GlobalSetting, RequestExtension, ExecuteInput, Result, Deletion, DeletionPayload } from './types'
+import type {
+  GlobalSetting,
+  RequestExtension,
+  ExecuteInput,
+  Result,
+  Deletion,
+  DeletionPayload,
+  DynamicFieldResponse,
+  ResultMultiStatusNode
+} from './types'
 import type { AllRequestOptions } from '../request-client'
-import { ErrorCodes, IntegrationError, InvalidAuthenticationError } from '../errors'
+import { ErrorCodes, IntegrationError, InvalidAuthenticationError, MultiStatusErrorReporter } from '../errors'
 import { AuthTokens, getAuthData, getOAuth2Data, updateOAuthSettings } from './parse-settings'
 import { InputData, Features } from '../mapping-kit'
 import { retry } from '../retry'
 import { HTTPError } from '..'
 
-export type { BaseActionDefinition, ActionDefinition, ExecuteInput, RequestFn }
+export type {
+  BaseActionDefinition,
+  ActionDefinition,
+  ActionHookDefinition,
+  ActionHookResponse,
+  ActionHookType,
+  ExecuteInput,
+  RequestFn,
+  Result
+}
+export { hookTypeStrings }
 export type { MinimalInputField }
 export { fieldsToJsonSchema }
 
@@ -67,15 +96,26 @@ export type AudienceResult = {
 }
 
 export type AudienceMode = { type: 'realtime' } | { type: 'synced'; full_audience_sync: boolean }
+// Personas are referenced in the following location: [GitHub - external-audience-manager-service](https://github.com/segmentio/external-audience-manager-service/blob/97b95a968ffdfedad095928f5c2037c24e92886e/internal/gxClient/gxClient.go#L75C2-L79C4).
+export type Personas = {
+  computation_id: string
+  computation_key: string
+  namespace: string
+  [key: string]: unknown
+}
 
 export type CreateAudienceInput<Settings = unknown, AudienceSettings = unknown> = {
   settings: Settings
 
   audienceSettings?: AudienceSettings
 
+  personas?: Personas
+
   audienceName: string
 
   statsContext?: StatsContext
+
+  features?: Features
 }
 
 export type GetAudienceInput<Settings = unknown, AudienceSettings = unknown> = {
@@ -86,6 +126,8 @@ export type GetAudienceInput<Settings = unknown, AudienceSettings = unknown> = {
   externalId: string
 
   statsContext?: StatsContext
+
+  features?: Features
 }
 
 export interface AudienceDestinationConfiguration {
@@ -114,8 +156,8 @@ const instanceOfAudienceDestinationSettingsWithCreateGet = (
 export interface AudienceDestinationDefinition<Settings = unknown, AudienceSettings = unknown>
   extends DestinationDefinition<Settings> {
   audienceConfig:
-    | AudienceDestinationConfiguration
     | AudienceDestinationConfigurationWithCreateGet<Settings, AudienceSettings>
+    | AudienceDestinationConfiguration
 
   audienceFields: Record<string, GlobalSetting>
 
@@ -157,6 +199,10 @@ export interface Subscription {
   partnerAction: string
   subscribe: string
   mapping?: JSONObject
+  ActionID?: string
+  ConfigID?: string
+  ID?: string
+  ProjectID?: string
 }
 
 export interface OAuth2ClientCredentials extends AuthTokens {
@@ -242,6 +288,13 @@ export type AuthenticationScheme<Settings = any> =
   | OAuth2Authentication<Settings>
   | OAuthManagedAuthentication<Settings>
 
+export type SubscriptionMetadata = {
+  actionConfigId?: string
+  destinationConfigId?: string
+  actionId?: string
+  sourceId?: string
+}
+
 interface EventInput<Settings> {
   readonly event: SegmentEvent
   readonly mapping: JSONObject
@@ -252,8 +305,11 @@ interface EventInput<Settings> {
   readonly features?: Features
   readonly statsContext?: StatsContext
   readonly logger?: Logger
+  /** Engage internal use only. DO NOT USE. */
+  readonly engageDestinationCache?: EngageDestinationCache
   readonly transactionContext?: TransactionContext
   readonly stateContext?: StateContext
+  readonly subscriptionMetadata?: SubscriptionMetadata
 }
 
 interface BatchEventInput<Settings> {
@@ -266,8 +322,11 @@ interface BatchEventInput<Settings> {
   readonly features?: Features
   readonly statsContext?: StatsContext
   readonly logger?: Logger
+  /** Engage internal use only. DO NOT USE. */
+  readonly engageDestinationCache?: EngageDestinationCache
   readonly transactionContext?: TransactionContext
   readonly stateContext?: StateContext
+  readonly subscriptionMetadata?: SubscriptionMetadata
 }
 
 export interface DecoratedResponse extends ModifiedResponse {
@@ -281,6 +340,8 @@ interface OnEventOptions {
   features?: Features
   statsContext?: StatsContext
   logger?: Logger
+  /** Engage internal use only. DO NOT USE. */
+  readonly engageDestinationCache?: EngageDestinationCache
   transactionContext?: TransactionContext
   stateContext?: StateContext
   /** Handler to perform synchronization. If set, the refresh access token method will be synchronized across
@@ -334,6 +395,15 @@ export interface Logger {
   withTags(extraTags: any): void
 }
 
+export interface EngageDestinationCache {
+  getByKey: (key: string) => Promise<string | null>
+  readonly maxExpirySeconds: number
+  readonly maxValueSizeBytes: number
+  setByKey: (key: string, value: string, expiryInSeconds?: number) => Promise<boolean>
+  setByKeyNX: (key: string, value: string, expiryInSeconds?: number) => Promise<boolean>
+  delByKey: (key: string) => Promise<number>
+}
+
 export class Destination<Settings = JSONObject, AudienceSettings = JSONObject> {
   readonly definition: DestinationDefinition<Settings>
   readonly name: string
@@ -372,7 +442,10 @@ export class Destination<Settings = JSONObject, AudienceSettings = JSONObject> {
   validateSettings(settings: Settings): void {
     if (this.settingsSchema) {
       try {
-        validateSchema(settings, this.settingsSchema, { schemaKey: `${this.name}:settings` })
+        validateSchema(settings, this.settingsSchema, {
+          schemaKey: `${this.name}:settings`,
+          exempt: ['dynamicAuthSettings']
+        })
       } catch (err) {
         const error = err as ResponseError
         if (error.name === 'AggregateAjvError' || error.name === 'ValidationError') {
@@ -385,41 +458,62 @@ export class Destination<Settings = JSONObject, AudienceSettings = JSONObject> {
   }
 
   async createAudience(createAudienceInput: CreateAudienceInput<Settings, AudienceSettings>) {
-    const audienceDefinition = this.definition as AudienceDestinationDefinition
-    if (!instanceOfAudienceDestinationSettingsWithCreateGet(audienceDefinition.audienceConfig)) {
+    let settings: JSONObject = createAudienceInput.settings as unknown as JSONObject
+    const { audienceConfig, audienceFields } = this.definition as AudienceDestinationDefinition
+    if (!instanceOfAudienceDestinationSettingsWithCreateGet(audienceConfig)) {
       throw new Error('Unexpected call to createAudience')
     }
-    const destinationSettings = this.getDestinationSettings(createAudienceInput.settings as unknown as JSONObject)
-    const auth = getAuthData(createAudienceInput.settings as unknown as JSONObject)
-    const context: ExecuteInput<Settings, any, AudienceSettings> = {
-      audienceSettings: createAudienceInput.audienceSettings,
-      settings: destinationSettings,
-      payload: undefined,
-      auth
+    //validate audienceField Input
+    if (createAudienceInput.audienceSettings && Object.keys(createAudienceInput.audienceSettings).length > 0) {
+      validateSchema(createAudienceInput.audienceSettings, fieldsToJsonSchema(audienceFields), {
+        exempt: ['dynamicAuthSettings']
+      })
     }
-    const options = this.extendRequest?.(context) ?? {}
-    const requestClient = createRequestClient({ ...options, statsContext: context.statsContext })
+    const destinationSettings = this.getDestinationSettings(settings)
+    const run = async () => {
+      const auth = getAuthData(settings)
+      const context: ExecuteInput<Settings, any, AudienceSettings> = {
+        audienceSettings: createAudienceInput.audienceSettings,
+        settings: destinationSettings,
+        payload: undefined,
+        auth
+      }
+      const opts = this.extendRequest?.(context) ?? {}
+      const requestClient = createRequestClient({ ...opts, statsContext: context.statsContext })
+      return await audienceConfig?.createAudience(requestClient, createAudienceInput)
+    }
 
-    return audienceDefinition.audienceConfig?.createAudience(requestClient, createAudienceInput)
+    const onFailedAttempt = async (error: ResponseError & HTTPError) => {
+      settings = await this.handleAuthError(error, settings)
+    }
+    return await retry(run, { retries: 2, onFailedAttempt })
   }
 
   async getAudience(getAudienceInput: GetAudienceInput<Settings, AudienceSettings>) {
-    const audienceDefinition = this.definition as AudienceDestinationDefinition
-    if (!instanceOfAudienceDestinationSettingsWithCreateGet(audienceDefinition.audienceConfig)) {
+    const { audienceConfig } = this.definition as AudienceDestinationDefinition
+    let settings: JSONObject = getAudienceInput.settings as unknown as JSONObject
+    if (!instanceOfAudienceDestinationSettingsWithCreateGet(audienceConfig)) {
       throw new Error('Unexpected call to getAudience')
     }
-    const destinationSettings = this.getDestinationSettings(getAudienceInput.settings as unknown as JSONObject)
-    const auth = getAuthData(getAudienceInput.settings as unknown as JSONObject)
-    const context: ExecuteInput<Settings, any, AudienceSettings> = {
-      audienceSettings: getAudienceInput.audienceSettings,
-      settings: destinationSettings,
-      payload: undefined,
-      auth
+    const destinationSettings = this.getDestinationSettings(settings)
+    const run = async () => {
+      const auth = getAuthData(settings)
+      const context: ExecuteInput<Settings, any, AudienceSettings> = {
+        audienceSettings: getAudienceInput.audienceSettings,
+        settings: destinationSettings,
+        payload: undefined,
+        auth
+      }
+      const opts = this.extendRequest?.(context) ?? {}
+      const requestClient = createRequestClient({ ...opts, statsContext: context.statsContext })
+      return await audienceConfig?.getAudience(requestClient, getAudienceInput)
     }
-    const options = this.extendRequest?.(context) ?? {}
-    const requestClient = createRequestClient({ ...options, statsContext: context.statsContext })
 
-    return audienceDefinition.audienceConfig?.getAudience(requestClient, getAudienceInput)
+    const onFailedAttempt = async (error: ResponseError & HTTPError) => {
+      settings = await this.handleAuthError(error, settings)
+    }
+
+    return await retry(run, { retries: 2, onFailedAttempt })
   }
 
   async testAuthentication(settings: Settings): Promise<void> {
@@ -446,8 +540,9 @@ export class Destination<Settings = JSONObject, AudienceSettings = JSONObject> {
     try {
       await this.authentication.testAuthentication(requestClient, data)
     } catch (error) {
-      const statusCode = error?.response?.status ?? ''
-      throw new Error(`Credentials are invalid: ${statusCode} ${error.message}`)
+      const typedError = error as { response?: { status?: string | number }; message: string }
+      const statusCode = typedError?.response?.status ?? ''
+      throw new Error(`Credentials are invalid: ${statusCode} ${typedError.message}`)
     }
   }
 
@@ -505,11 +600,13 @@ export class Destination<Settings = JSONObject, AudienceSettings = JSONObject> {
     {
       event,
       mapping,
+      subscriptionMetadata,
       settings,
       auth,
       features,
       statsContext,
       logger,
+      engageDestinationCache,
       transactionContext,
       stateContext
     }: EventInput<Settings>
@@ -533,8 +630,10 @@ export class Destination<Settings = JSONObject, AudienceSettings = JSONObject> {
       features,
       statsContext,
       logger,
+      engageDestinationCache,
       transactionContext,
-      stateContext
+      stateContext,
+      subscriptionMetadata
     })
   }
 
@@ -543,11 +642,13 @@ export class Destination<Settings = JSONObject, AudienceSettings = JSONObject> {
     {
       events,
       mapping,
+      subscriptionMetadata,
       settings,
       auth,
       features,
       statsContext,
       logger,
+      engageDestinationCache,
       transactionContext,
       stateContext
     }: BatchEventInput<Settings>
@@ -563,7 +664,7 @@ export class Destination<Settings = JSONObject, AudienceSettings = JSONObject> {
       audienceSettings = events[0].context?.personas?.audience_settings as AudienceSettings
     }
 
-    await action.executeBatch({
+    return await action.executeBatch({
       mapping,
       data: events as unknown as InputData[],
       settings,
@@ -572,24 +673,28 @@ export class Destination<Settings = JSONObject, AudienceSettings = JSONObject> {
       features,
       statsContext,
       logger,
+      engageDestinationCache,
       transactionContext,
-      stateContext
+      stateContext,
+      subscriptionMetadata
     })
-
-    return [{ output: 'successfully processed batch of events' }]
   }
 
   public async executeDynamicField(
     actionSlug: string,
     fieldKey: string,
-    data: ExecuteDynamicFieldInput<Settings, object>
+    data: ExecuteDynamicFieldInput<Settings, object>,
+    /**
+     * The dynamicFn argument is optional since it is only used by dynamic hook input fields. (For now)
+     */
+    dynamicFn?: RequestFn<Settings, any, DynamicFieldResponse, AudienceSettings>
   ) {
     const action = this.actions[actionSlug]
     if (!action) {
       return []
     }
 
-    return action.executeDynamicField(fieldKey, data)
+    return action.executeDynamicField(fieldKey, data, dynamicFn)
   }
 
   private async onSubscription(
@@ -599,15 +704,25 @@ export class Destination<Settings = JSONObject, AudienceSettings = JSONObject> {
     auth: AuthTokens,
     options?: OnEventOptions
   ): Promise<Result[]> {
+    const isBatch = Array.isArray(events)
+
     const subscriptionStartedAt = time()
     const actionSlug = subscription.partnerAction
     const input = {
       mapping: subscription.mapping || {},
+      subscriptionMetadata: {
+        actionConfigId: subscription.ID,
+        destinationConfigId: subscription.ConfigID,
+        actionId: subscription.ActionID,
+        sourceId: subscription.ProjectID
+      } as SubscriptionMetadata,
       settings,
       auth,
       features: options?.features || {},
       statsContext: options?.statsContext || ({} as StatsContext),
       logger: options?.logger,
+      /** Engage internal use only. DO NOT USE. */
+      engageDestinationCache: options?.engageDestinationCache,
       transactionContext: options?.transactionContext,
       stateContext: options?.stateContext
     }
@@ -616,26 +731,105 @@ export class Destination<Settings = JSONObject, AudienceSettings = JSONObject> {
 
     try {
       if (!subscription.subscribe || typeof subscription.subscribe !== 'string') {
-        results = [{ output: 'invalid subscription' }]
-        return results
+        const response: ResultMultiStatusNode = {
+          status: 400,
+          errortype: ErrorCodes.PAYLOAD_VALIDATION_FAILED,
+          errormessage: 'Failed to validate subscription',
+          errorreporter: MultiStatusErrorReporter.INTEGRATIONS
+        }
+
+        if (isBatch) {
+          // Add datadog stats for events that are discarded by Actions
+          options?.statsContext?.statsClient?.incr(
+            'action.multistatus_discard',
+            (events as SegmentEvent[]).length,
+            options.statsContext?.tags
+          )
+
+          return [
+            {
+              multistatus: Array((events as SegmentEvent[]).length).fill(response)
+            }
+          ]
+        }
+
+        return [{ output: response.errormessage }]
       }
 
       const parsedSubscription = parseFql(subscription.subscribe)
 
       if ((parsedSubscription as ErrorCondition).error) {
-        results = [{ output: `invalid subscription : ${(parsedSubscription as ErrorCondition).error.message}` }]
-        return results
+        const response: ResultMultiStatusNode = {
+          status: 400,
+          errortype: ErrorCodes.PAYLOAD_VALIDATION_FAILED,
+          errormessage: `Invalid subscription : ${(parsedSubscription as ErrorCondition).error.message}`,
+          errorreporter: MultiStatusErrorReporter.INTEGRATIONS
+        }
+
+        if (isBatch) {
+          // Add datadog stats for events that are discarded by Actions
+          options?.statsContext?.statsClient?.incr(
+            'action.multistatus_discard',
+            (events as SegmentEvent[]).length,
+            options.statsContext?.tags
+          )
+
+          return [
+            {
+              multistatus: Array((events as SegmentEvent[]).length).fill(response)
+            }
+          ]
+        }
+
+        return [{ output: response.errormessage }]
       }
 
-      const isBatch = Array.isArray(events)
       const allEvents = (isBatch ? events : [events]) as SegmentEvent[]
-      const subscribedEvents = allEvents.filter((event) => validate(parsedSubscription, event))
+
+      // Filter invalid events and record discards
+      const subscribedEvents: SegmentEvent[] = []
+
+      const multistatus: ResultMultiStatusNode[] = []
+      const invalidPayloadIndices = new Set<number>()
+
+      for (let i = 0; i < allEvents.length; i++) {
+        const event = allEvents[i]
+
+        if (!validate(parsedSubscription, event)) {
+          multistatus[i] = {
+            status: 400,
+            errortype: ErrorCodes.PAYLOAD_VALIDATION_FAILED,
+            errormessage: 'Payload is either invalid or does not match the subscription',
+            errorreporter: MultiStatusErrorReporter.INTEGRATIONS
+          }
+
+          invalidPayloadIndices.add(i)
+
+          // Add datadog stats for events that are discarded by Actions
+          options?.statsContext?.statsClient?.incr('action.multistatus_discard', 1, options.statsContext?.tags)
+          continue
+        }
+
+        subscribedEvents.push(event)
+      }
 
       if (subscribedEvents.length === 0) {
         results = [{ output: 'not subscribed' }]
         return results
       } else if (isBatch) {
-        return await this.executeBatch(actionSlug, { ...input, events: subscribedEvents })
+        const executeBatchResponse = await this.executeBatch(actionSlug, { ...input, events: subscribedEvents })
+
+        let mergeIndex = 0
+        for (let i = 0; i < allEvents.length; i++) {
+          // Skip if there an event is already present in the index
+          if (invalidPayloadIndices.has(i)) {
+            continue
+          }
+
+          multistatus[i] = executeBatchResponse[mergeIndex++]
+        }
+
+        return [{ multistatus }]
       } else {
         // there should only be 1 item in the subscribedEvents array
         return await this.executeAction(actionSlug, { ...input, event: subscribedEvents[0] })
@@ -686,22 +880,21 @@ export class Destination<Settings = JSONObject, AudienceSettings = JSONObject> {
     const payload = { userId, anonymousId }
     const destinationSettings = this.getDestinationSettings(settings as unknown as JSONObject)
     this.validateSettings(destinationSettings)
-    const auth = getAuthData(settings as unknown as JSONObject)
-    const data: ExecuteInput<Settings, DeletionPayload> = {
-      payload,
-      settings: destinationSettings,
-      auth
-    }
-    const context: ExecuteInput<Settings, any> = {
-      settings: destinationSettings,
-      payload,
-      auth
-    }
-
-    const opts = this.extendRequest?.(context) ?? {}
-    const requestClient = createRequestClient({ ...opts, statsContext: context.statsContext })
 
     const run = async () => {
+      const auth = getAuthData(settings as unknown as JSONObject)
+      const data: ExecuteInput<Settings, DeletionPayload> = {
+        payload,
+        settings: destinationSettings,
+        auth
+      }
+      const context: ExecuteInput<Settings, any> = {
+        settings: destinationSettings,
+        payload,
+        auth
+      }
+      const opts = this.extendRequest?.(context) ?? {}
+      const requestClient = createRequestClient({ ...opts, statsContext: context.statsContext })
       const deleteResult = await this.definition.onDelete?.(requestClient, data)
       const result: Result = deleteResult ?? { output: 'no onDelete defined' }
 
@@ -709,31 +902,7 @@ export class Destination<Settings = JSONObject, AudienceSettings = JSONObject> {
     }
 
     const onFailedAttempt = async (error: ResponseError & HTTPError) => {
-      const statusCode = error?.status ?? error?.response?.status ?? 500
-
-      // Throw original error if it is unrelated to invalid access tokens and not an oauth2 scheme
-      if (
-        !(
-          statusCode === 401 &&
-          (this.authentication?.scheme === 'oauth2' || this.authentication?.scheme === 'oauth-managed')
-        )
-      ) {
-        throw error
-      }
-
-      const oauthSettings = getOAuth2Data(settings)
-      const newTokens = await this.refreshAccessToken(
-        destinationSettings,
-        oauthSettings,
-        options?.synchronizeRefreshAccessToken
-      )
-      if (!newTokens) {
-        throw new InvalidAuthenticationError('Failed to refresh access token', ErrorCodes.OAUTH_REFRESH_FAILED)
-      }
-
-      // Update `settings` with new tokens
-      settings = updateOAuthSettings(settings, newTokens)
-      await options?.onTokenRefresh?.(newTokens)
+      settings = await this.handleAuthError(error, settings, options)
     }
 
     return await retry(run, { retries: 2, onFailedAttempt })
@@ -761,31 +930,7 @@ export class Destination<Settings = JSONObject, AudienceSettings = JSONObject> {
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const onFailedAttempt = async (error: any) => {
-      const statusCode = error?.status ?? error?.response?.status ?? 500
-
-      // Throw original error if it is unrelated to invalid access tokens and not an oauth2 scheme
-      if (
-        !(
-          statusCode === 401 &&
-          (this.authentication?.scheme === 'oauth2' || this.authentication?.scheme === 'oauth-managed')
-        )
-      ) {
-        throw error
-      }
-
-      const oauthSettings = getOAuth2Data(settings)
-      const newTokens = await this.refreshAccessToken(
-        destinationSettings,
-        oauthSettings,
-        options?.synchronizeRefreshAccessToken
-      )
-      if (!newTokens) {
-        throw new InvalidAuthenticationError('Failed to refresh access token', ErrorCodes.OAUTH_REFRESH_FAILED)
-      }
-
-      // Update `settings` with new tokens
-      settings = updateOAuthSettings(settings, newTokens)
-      await options?.onTokenRefresh?.(newTokens)
+      settings = await this.handleAuthError(error, settings, options)
     }
 
     return await retry(run, { retries: 2, onFailedAttempt })
@@ -812,5 +957,50 @@ export class Destination<Settings = JSONObject, AudienceSettings = JSONObject> {
   private getDestinationSettings(settings: JSONObject): Settings {
     const { subcription, subscriptions, oauth, ...otherSettings } = settings
     return otherSettings as unknown as Settings
+  }
+
+  /**
+   * Handles the failed attempt by checking if reauthentication is needed and updating the token if necessary.
+   * @param {ResponseError & HTTPError} error - The error object from the failed attempt.
+   * @param {JSONObject} settings - The current settings object.
+   * @returns {Promise<JSONObject>} - The updated settings object.
+   * @throws {ResponseError & HTTPError} - If reauthentication is not needed or token refresh fails.
+   */
+  async handleAuthError(error: ResponseError & HTTPError, settings: JSONObject, options?: OnEventOptions) {
+    const statusCode = error?.status ?? error?.response?.status ?? 500
+    const needsReauthentication =
+      statusCode === 401 &&
+      (this.authentication?.scheme === 'oauth2' || this.authentication?.scheme === 'oauth-managed')
+    if (!needsReauthentication) {
+      throw error
+    }
+    const newTokens = await this.refreshTokenAndGetNewToken(settings, options)
+    // Update new access-token in cache and in settings.
+    await options?.onTokenRefresh?.(newTokens)
+    settings = updateOAuthSettings(settings, newTokens)
+    return settings
+  }
+
+  /**
+   * Refreshes the token and retrieves new tokens.
+   * @param {JSONObject} settings - The current settings object.
+   * @param {OnEventOptions} [options] - Optional event options for synchronizing token refresh.
+   * @returns {Promise<RefreshAccessTokenResult>} - The new tokens object.
+   * @throws {InvalidAuthenticationError} - If token refresh fails.
+   */
+  async refreshTokenAndGetNewToken(settings: JSONObject, options?: OnEventOptions): Promise<RefreshAccessTokenResult> {
+    const destinationSettings = this.getDestinationSettings(settings)
+    const oauthSettings = getOAuth2Data(settings)
+    const newTokens = await this.refreshAccessToken(
+      destinationSettings,
+      oauthSettings,
+      options?.synchronizeRefreshAccessToken
+    )
+
+    if (!newTokens) {
+      throw new InvalidAuthenticationError('Failed to refresh access token', ErrorCodes.OAUTH_REFRESH_FAILED)
+    }
+
+    return newTokens
   }
 }

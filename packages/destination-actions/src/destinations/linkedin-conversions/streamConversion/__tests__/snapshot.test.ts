@@ -7,15 +7,17 @@ const testDestination = createTestIntegration(destination)
 const actionSlug = 'streamConversion'
 const destinationSlug = 'LinkedinConversions'
 const seedName = `${destinationSlug}#${actionSlug}`
+const action = destination.actions[actionSlug]
+const [eventData, settingsData] = generateTestData(seedName, destination, action, true)
 
 describe(`Testing snapshot for ${destinationSlug}'s ${actionSlug} destination action:`, () => {
   it('required fields', async () => {
-    const action = destination.actions[actionSlug]
-    const [eventData, settingsData] = generateTestData(seedName, destination, action, true)
-
     nock(/.*/).persist().get(/.*/).reply(200)
     nock(/.*/).persist().post(/.*/).reply(200)
     nock(/.*/).persist().put(/.*/).reply(200)
+
+    eventData.email = 'nick@twilio.com'
+    eventData.timestamp = 'NaN'
 
     const event = createTestEvent({
       properties: eventData
@@ -23,7 +25,18 @@ describe(`Testing snapshot for ${destinationSlug}'s ${actionSlug} destination ac
 
     const responses = await testDestination.testAction(actionSlug, {
       event: event,
-      mapping: event.properties,
+      mapping: {
+        email: { '@path': '$.properties.email' },
+        conversionHappenedAt: { '@path': '$.properties.timestamp' },
+        onMappingSave: {
+          inputs: {},
+          outputs: {
+            id: '1234'
+          }
+        },
+        enable_batching: true,
+        batch_size: 5000
+      },
       settings: settingsData,
       auth: undefined
     })
@@ -43,12 +56,18 @@ describe(`Testing snapshot for ${destinationSlug}'s ${actionSlug} destination ac
   })
 
   it('all fields', async () => {
-    const action = destination.actions[actionSlug]
-    const [eventData, settingsData] = generateTestData(seedName, destination, action, false)
-
     nock(/.*/).persist().get(/.*/).reply(200)
     nock(/.*/).persist().post(/.*/).reply(200)
     nock(/.*/).persist().put(/.*/).reply(200)
+
+    eventData.email = 'nick@twilio.com'
+    eventData.timestamp = 'NaN'
+    eventData.first_name = 'mike'
+    eventData.last_name = 'smith'
+    eventData.title = 'software engineer'
+    eventData.companyName = 'microsoft'
+    eventData.countryCode = 'US'
+    eventData.value = 100
 
     const event = createTestEvent({
       properties: eventData
@@ -56,7 +75,29 @@ describe(`Testing snapshot for ${destinationSlug}'s ${actionSlug} destination ac
 
     const responses = await testDestination.testAction(actionSlug, {
       event: event,
-      mapping: event.properties,
+      mapping: {
+        email: { '@path': '$.properties.email' },
+        conversionHappenedAt: { '@path': '$.properties.timestamp' },
+        conversionValue: {
+          currencyCode: 'USD',
+          amount: { '@path': '$.properties.value' }
+        },
+        userInfo: {
+          firstName: { '@path': '$.properties.first_name' },
+          lastName: { '@path': '$.properties.last_name' },
+          title: { '@path': '$.properties.title' },
+          companyName: { '@path': '$.properties.companyName' },
+          countryCode: { '@path': '$.properties.countryCode' }
+        },
+        onMappingSave: {
+          inputs: {},
+          outputs: {
+            id: '1234'
+          }
+        },
+        enable_batching: true,
+        batch_size: 5000
+      },
       settings: settingsData,
       auth: undefined
     })

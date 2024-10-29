@@ -69,9 +69,13 @@ export async function createAudience(
 }
 
 export function validate(payloads: GenericPayload[]): void {
-  if (payloads[0].send_email === false && payloads[0].send_advertising_id === false) {
+  if (
+    payloads[0].send_email === false &&
+    payloads[0].send_advertising_id === false &&
+    payloads[0].send_phone === false
+  ) {
     throw new IntegrationError(
-      'At least one of `Send Email`, or `Send Advertising ID` must be set to `true`.',
+      'At least one of `Send Email`, `Send Phone` or `Send Advertising ID` must be set to `true`.',
       'INVALID_SETTINGS',
       400
     )
@@ -85,12 +89,17 @@ export function getIDSchema(payload: GenericPayload): string[] {
   if (payload.send_email === true) {
     id_schema.push('EMAIL_SHA256')
   }
+  if (payload.send_phone === true) {
+    id_schema.push('PHONE_SHA256')
+  }
   if (payload.send_advertising_id === true) {
     id_schema.push('IDFA_SHA256')
   }
 
   return id_schema
 }
+
+const isHashedInformation = (information: string): boolean => new RegExp(/[0-9abcdef]{64}/gi).test(information)
 
 export function extractUsers(payloads: GenericPayload[]): {}[][] {
   const batch_data: {}[][] = []
@@ -119,12 +128,36 @@ export function extractUsers(payloads: GenericPayload[]): {}[][] {
           .replace(/\+.*@/, '@')
           .replace(/\.(?=.*@)/g, '')
           .toLowerCase()
+
+        // If email is already hashed, don't hash it again
+        let hashedEmail = payload.email
+        if (!isHashedInformation(payload.email)) {
+          hashedEmail = createHash('sha256').update(payload.email).digest('hex')
+        }
+
         email_id = {
-          id: createHash('sha256').update(payload.email).digest('hex'),
+          id: hashedEmail,
           audience_ids: [external_audience_id]
         }
       }
       user_ids.push(email_id)
+    }
+
+    if (payload.send_phone === true) {
+      let phone_id = {}
+      if (payload.phone) {
+        // If phone is already hashed, don't hash it again
+        let hashedPhone = payload.phone
+        if (!isHashedInformation(payload.phone)) {
+          hashedPhone = createHash('sha256').update(payload.phone).digest('hex')
+        }
+
+        phone_id = {
+          id: hashedPhone,
+          audience_ids: [external_audience_id]
+        }
+      }
+      user_ids.push(phone_id)
     }
 
     if (payload.send_advertising_id === true) {

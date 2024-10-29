@@ -6,8 +6,10 @@ import {
   selected_advertiser_id,
   audience_id,
   email,
+  phone,
   advertising_id,
   send_email,
+  send_phone,
   send_advertising_id,
   event_name,
   enable_batching
@@ -19,15 +21,17 @@ import { TikTokAudiences } from '../api'
 // TODO: Remove on cleanup.
 
 const action: ActionDefinition<Settings, Payload> = {
-  title: 'Add Users',
+  title: 'Add Users (Legacy)',
   description: 'Add contacts from an Engage Audience to a TikTok Audience Segment.',
   defaultSubscription: 'event = "Audience Entered"',
   fields: {
     selected_advertiser_id: { ...selected_advertiser_id },
     audience_id: { ...audience_id },
     email: { ...email },
+    phone: { ...phone },
     advertising_id: { ...advertising_id },
     send_email: { ...send_email },
+    send_phone: { ...send_phone },
     send_advertising_id: { ...send_advertising_id },
     event_name: { ...event_name },
     enable_batching: { ...enable_batching }

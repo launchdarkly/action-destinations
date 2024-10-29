@@ -46,8 +46,13 @@ export interface RevOrg extends IdFragment {
 
 export interface RevUser extends IdFragment {
   created_date: string
-  rev_org: IdFragment
+  rev_org?: IdFragment
   email: string
+  tags?: {
+    tag: {
+      id: string
+    }
+  }[]
 }
 
 export interface DevUser extends IdFragment {
@@ -119,7 +124,16 @@ export interface CreateAccountBody {
   external_refs: string[]
 }
 
+export interface CreateRevUserBody {
+  email: string
+  external_ref: string
+  display_name?: string
+  tags?: { id: string }[]
+  org_id?: string
+}
+
 export interface TraceEvent {
+  event_id: string
   event_time: string
   name: string
   payload: object
